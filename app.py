@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from io import BytesIO
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
@@ -10,40 +11,15 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 st.set_page_config(page_title="IBR — AI in Financial Forecasting", layout="wide")
 
 # -------------------------
-# Data loaders & utilities
+# Helpers
 # -------------------------
 @st.cache_data
-def _try_read_excel(paths, sheet_name="Cleaned"):
-    last_err = None
-    for p in paths:
-        try:
-            return pd.read_excel(p, sheet_name=sheet_name), p
-        except Exception as e:
-            last_err = e
-            continue
-    raise RuntimeError(f"Could not load any of: {paths}\nLast error: {last_err}")
-
-@st.cache_data
-def load_ibr_excel():
-    # Try common repo locations; supports a space in the filename
-    candidates = [
-        "data/IBR Sheet.xlsx",
-        "data/IBR_Sheet.xlsx",
-        "IBR Sheet.xlsx",
-        "IBR_Sheet.xlsx",
-    ]
-    df, used_path = _try_read_excel(candidates, sheet_name="Cleaned")
-    # Drop Excel helper columns like 'Unnamed: xx'
+def load_uploaded_excel(file_bytes: bytes, sheet: str | int):
+    """Read an uploaded Excel file (bytes) and return a cleaned dataframe."""
+    df = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet)
+    # drop Excel helper columns like 'Unnamed: xx'
     df = df.loc[:, ~df.columns.astype(str).str.startswith("Unnamed")]
-    # Date parsing & sort
-    if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"])
-        df = df.sort_values("Date").reset_index(drop=True)
-    return df, used_path
-
-@st.cache_data
-def load_csv(file):
-    df = pd.read_csv(file)
+    # parse/sort date if present
     if "Date" in df.columns:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date").reset_index(drop=True)
@@ -127,30 +103,29 @@ def train_eval(df, target_col, features, model_name="Random Forest", test_frac=0
     return {"model": model, "y_test": yte, "y_pred": yhat, "RMSE": rmse, "MAE": mae, "DA": da, "fi": fi, "cut": cut}
 
 # -------------------------
-# UI — Sidebar
+# UI — Sidebar (Upload-first)
 # -------------------------
-st.sidebar.title("IBR Controls")
+st.sidebar.title("Upload your IBR data (Excel)")
+upl = st.sidebar.file_uploader("Drag & drop your .xlsx", type=["xlsx", "xls"])
 
-src = st.sidebar.radio("Data source", ["Use IBR Sheet.xlsx (Cleaned)", "Upload CSV/Excel"])
+if upl is None:
+    st.title("IBR Dashboard — AI in Financial Forecasting")
+    st.info("👈 Upload your Excel file in the sidebar to begin. The app is designed for your IBR sheet.")
+    st.stop()
 
-if src == "Use IBR Sheet.xlsx (Cleaned)":
-    df_raw, used_path = load_ibr_excel()
-    st.sidebar.caption(f"Loaded: `{used_path}` (sheet: Cleaned)")
-else:
-    up = st.sidebar.file_uploader("Upload CSV/Excel", type=["csv", "xlsx", "xls"])
-    if up is None:
-        st.stop()
-    if up.name.lower().endswith((".xlsx", ".xls")):
-        df_raw = pd.read_excel(up)
-    else:
-        df_raw = load_csv(up)
-    # drop helper columns
-    df_raw = df_raw.loc[:, ~df_raw.columns.astype(str).str.startswith("Unnamed")]
+# Let user pick the sheet (default to 'Cleaned' if present)
+with pd.ExcelFile(upl) as xls:
+    sheets = xls.sheet_names
+default_idx = sheets.index("Cleaned") if "Cleaned" in sheets else 0
+sheet_choice = st.sidebar.selectbox("Choose sheet", sheets, index=default_idx)
 
-# Coerce common numeric cols if they exist
+# Load selected sheet
+df_raw = load_uploaded_excel(upl.getvalue(), sheet_choice)
+
+# Coerce common numeric cols
 df_raw = ensure_numeric(df_raw, [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df_raw.columns])
 
-# Column mapping
+# Column mapping (in case your column names differ)
 st.sidebar.subheader("Column Mapping")
 date_col = st.sidebar.selectbox(
     "Date column", options=df_raw.columns, index=list(df_raw.columns).index("Date") if "Date" in df_raw.columns else 0
@@ -180,7 +155,7 @@ dr = st.sidebar.date_input("Date range", value=[dmin, dmax], min_value=dmin, max
 if isinstance(dr, (list, tuple)) and len(dr) == 2:
     df = df[(df[date_col] >= pd.to_datetime(dr[0])) & (df[date_col] <= pd.to_datetime(dr[1]))].reset_index(drop=True)
 
-# Quality toggles (displayed only if columns exist)
+# Quality toggles (shown only if flags exist)
 st.sidebar.subheader("Data Quality")
 miss_col = "Missing_Flag" if "Missing_Flag" in df.columns else None
 noise_col = "Noise_Flag" if "Noise_Flag" in df.columns else None
@@ -191,7 +166,7 @@ if miss_col and drop_miss:
 if noise_col and drop_noise:
     df = df[df[noise_col] != 1]
 
-# Feature engineering controls
+# Feature knobs
 st.sidebar.subheader("Features")
 lags = st.sidebar.multiselect("Lag days", [1, 3, 5, 10], default=[1, 5, 10])
 mas = st.sidebar.multiselect("Moving avgs", [5, 10, 20], default=[5, 10, 20])
@@ -201,7 +176,6 @@ vols = st.sidebar.multiselect("Vol windows", [5, 10, 20], default=[5, 10, 20])
 # Build features & target
 # -------------------------
 df_feat = df.rename(columns={date_col: "Date", price_col: "Close"}).copy()
-
 sentiment_in = None if sent_col == "<none>" else sent_col
 market_in = None if mkt_col == "<none>" else mkt_col
 
@@ -222,15 +196,14 @@ if target == "Next-day Return":
     df_feat["Target"] = df_feat["Return"].shift(-1)
 else:
     df_feat["Target"] = df_feat["Close"].shift(-1)
-
 df_feat = df_feat.dropna().reset_index(drop=True)
 
 # Features for modeling
 feature_prefixes = ["lag_ret_", "lag_close_", "sma_", "ema_", "vol_", "sentiment_z", "Volume"]
 base_feats = [c for c in df_feat.columns if any(c.startswith(p) for p in feature_prefixes)]
-for must in ["Close", "Return"]:
-    if must in df_feat.columns and must not in base_feats:
-        base_feats.append(must)
+for req in ["Close", "Return"]:
+    if (req in df_feat.columns) and (req not in base_feats):
+        base_feats.append(req)
 
 # -------------------------
 # Header & KPIs
@@ -323,7 +296,7 @@ else:
 # -------------------------
 with st.expander("Ethical & Regulatory Checklist"):
     st.markdown("""
-- **Transparency**: The app logs feature choices (lags, MAs, vols), target definition, and test split.
+- **Transparency**: Document feature choices (lags, MAs, vols), target definition, and test split.
 - **Accountability**: Record model type and parameters when exporting results.
 - **Fairness**: Check for distribution shifts when toggling data-quality filters.
 - **Overfitting Guardrails**: Prefer walk-forward or expanding-window CV before any live decisions.

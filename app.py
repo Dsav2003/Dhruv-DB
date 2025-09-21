@@ -8,7 +8,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-st.set_page_config(page_title="I love sherman IBR — AI in Financial Forecasting", layout="wide")
+st.set_page_config(page_title="IBR — AI in Financial Forecasting", layout="wide")
 
 # -------------------------
 # Helpers

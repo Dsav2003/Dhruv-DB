@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import numpy as py
+import numpy as np  # ✅ make sure numpy is imported
 import matplotlib.pyplot as plt
 from io import BytesIO
 from sklearn.ensemble import RandomForestRegressor
@@ -17,25 +17,35 @@ st.set_page_config(page_title="IBR — AI in Financial Forecasting", layout="wid
 def load_uploaded_excel(file_bytes: bytes, sheet: str | int):
     """Read an uploaded Excel file (bytes) and return a cleaned dataframe."""
     df = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet)
-    # drop Excel helper columns like 'Unnamed: xx'
+    # Drop Excel helper columns like 'Unnamed: xx'
     df = df.loc[:, ~df.columns.astype(str).str.startswith("Unnamed")]
-    # parse/sort date if present
+    # Parse/sort date if present
     if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"])
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.sort_values("Date").reset_index(drop=True)
     return df
 
 def ensure_numeric(df, cols):
+    """Coerce selected columns to numeric; non-convertible values become NaN."""
     for c in cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
 def compute_returns(df, price_col="Close"):
-    df = df.copy()
-    df["Return"] = df[price_col].pct_change()
-    df["LogReturn"] = np.log1p(df["Return"])
-    return df
+    """Add simple and log returns; robust to non-numeric data."""
+    if price_col not in df.columns:
+        st.error(f"Price column '{price_col}' not found. Please map the correct column in the sidebar.")
+        st.stop()
+    out = df.copy()
+    out[price_col] = pd.to_numeric(out[price_col], errors="coerce")
+    if out[price_col].isna().all():
+        st.error(f"Column '{price_col}' contains no numeric values. Pick a different column or clean the data.")
+        st.stop()
+    out["Return"] = out[price_col].pct_change()
+    # use np.log1p safely; if Return < -1 it will become NaN which is fine
+    out["LogReturn"] = np.log1p(out["Return"])
+    return out
 
 def engineer_features(
     df,
@@ -46,21 +56,20 @@ def engineer_features(
     sentiment_col=None,
     market_col=None,
 ):
-    df = df.copy()
     df = compute_returns(df, price_col=price_col)
     for L in lags:
         df[f"lag_ret_{L}"] = df["Return"].shift(L)
         df[f"lag_close_{L}"] = df[price_col].shift(L)
     for M in mas:
-        df[f"sma_{M}"] = df[price_col].rolling(M).mean()
+        df[f"sma_{M}"] = df[price_col].rolling(M, min_periods=1).mean()
         df[f"ema_{M}"] = df[price_col].ewm(span=M, adjust=False).mean()
     for W in vol_windows:
-        df[f"vol_{W}"] = df["Return"].rolling(W).std()
+        df[f"vol_{W}"] = df["Return"].rolling(W, min_periods=2).std()
 
     if sentiment_col and sentiment_col in df.columns:
-        s = df[sentiment_col]
+        s = pd.to_numeric(df[sentiment_col], errors="coerce")
         std = s.std(ddof=0)
-        df["sentiment_z"] = (s - s.mean()) / (std if std != 0 else 1)
+        df["sentiment_z"] = (s - s.mean()) / (std if std and std != 0 else 1)
 
     if market_col and market_col in df.columns:
         df = pd.get_dummies(df, columns=[market_col], drop_first=True)
@@ -72,7 +81,14 @@ def directional_accuracy(y_true, y_pred):
 
 def train_eval(df, target_col, features, model_name="Random Forest", test_frac=0.2):
     n = len(df)
+    if n < 10:
+        st.error("Not enough rows after feature engineering to train a model.")
+        st.stop()
     cut = int(n * (1 - test_frac))
+    if cut <= 0 or cut >= n:
+        st.error("Invalid test fraction; adjust the slider in the sidebar.")
+        st.stop()
+
     Xtr, Xte = df[features].iloc[:cut], df[features].iloc[cut:]
     ytr, yte = df[target_col].iloc[:cut], df[target_col].iloc[cut:]
 
@@ -103,7 +119,7 @@ def train_eval(df, target_col, features, model_name="Random Forest", test_frac=0
     return {"model": model, "y_test": yte, "y_pred": yhat, "RMSE": rmse, "MAE": mae, "DA": da, "fi": fi, "cut": cut}
 
 # -------------------------
-# UI — Sidebar (Upload-first)
+# UI — Upload-first
 # -------------------------
 st.sidebar.title("Upload your IBR data (Excel)")
 upl = st.sidebar.file_uploader("Drag & drop your .xlsx", type=["xlsx", "xls"])
@@ -148,8 +164,8 @@ mkt_col = st.sidebar.selectbox(
 
 # Date filter
 df = df_raw.copy()
-df[date_col] = pd.to_datetime(df[date_col])
-df = df.sort_values(date_col).reset_index(drop=True)
+df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+df = df.dropna(subset=[date_col]).sort_values(date_col).reset_index(drop=True)
 dmin, dmax = df[date_col].min(), df[date_col].max()
 dr = st.sidebar.date_input("Date range", value=[dmin, dmax], min_value=dmin, max_value=dmax)
 if isinstance(dr, (list, tuple)) and len(dr) == 2:

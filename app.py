@@ -1,8 +1,8 @@
-# app.py — IBR Streamlit Dashboard (upload-first) with improved UI/UX and scaling
-# - Modern look (tabs, spacing, subtle styling)
+# app.py — IBR Streamlit Dashboard (upload-first) with improved UI/UX, scaling, and robust imputation
 # - Plotly charts (responsive, rangeslider, log y, dual panels, tooltips)
-# - Autoscaling controls for charts
-# - Robust modeling & IBR features
+# - Feature engineering, multi-model lab, leaderboard, explainability
+# - Data-quality lab (imputation, noise, KS shift) — fixed KeyError in time interpolate
+# - Simple backtest + governance/model card
 
 import streamlit as st
 import pandas as pd
@@ -336,7 +336,6 @@ with tab_overview:
         rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05,
         row_heights=[0.72, 0.28]
     )
-    # Prefer candlestick if OHLC is present
     has_ohlc = all(col in df_feat.columns for col in ["Open", "High", "Low", "Close"])
     if has_ohlc:
         fig.add_trace(
@@ -378,7 +377,6 @@ with tab_overview:
 with tab_eda:
     c1, c2 = st.columns([2, 1])
     with c1:
-        # Rolling vol
         if "Return" in df_feat.columns:
             roll = df_feat.set_index("Date")[["Return"]].copy()
             roll["vol_20d"] = roll["Return"].rolling(20, min_periods=5).std()
@@ -387,13 +385,11 @@ with tab_eda:
             figv.update_yaxes(title="20D Rolling Volatility")
             st.plotly_chart(figv, use_container_width=True)
     with c2:
-        # Boxplot of returns
         if "Return" in df_feat.columns:
             figb = px.box(df_feat, y="Return", template=template_choice, points=False)
             figb.update_layout(height=chart_height, margin=dict(l=10, r=10, t=10, b=10))
             st.plotly_chart(figb, use_container_width=True)
 
-    # Correlation heatmap (engineered features)
     num_cols = [c for c in base_feats if df_feat[c].dtype != "O"]
     if len(num_cols) > 1:
         corr = df_feat[num_cols].corr()
@@ -403,11 +399,9 @@ with tab_eda:
         figh.update_layout(height=min(chart_height, 600), margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(figh, use_container_width=True)
 
-    # Data dictionary
     st.markdown("### Data Dictionary & Quality Summary")
     st.dataframe(data_summary(df), use_container_width=True, height=320)
 
-    # ACF (optional)
     st.markdown("### Return Auto-Correlation (lag 1–10)")
     if HAS_STATSMODELS and "Return" in df_feat.columns:
         series = df_feat["Return"].dropna().values
@@ -435,7 +429,6 @@ with tab_model:
         da_str = "N/A" if (res['DA'] is None or np.isnan(res['DA'])) else f"{res['DA']*100:.1f}%"
         m3.metric("Directional Accuracy", da_str)
 
-        # Prediction vs Actual
         test_idx = df_feat.index[res["cut"]:]
         pv = pd.DataFrame({
             "Date": df_feat.loc[test_idx, "Date"].values,
@@ -451,7 +444,6 @@ with tab_model:
         )
         st.plotly_chart(figpv, use_container_width=True)
 
-        # Feature importance (tree models)
         if res["fi"] is not None and len(res["fi"]) > 0:
             top_fi = res["fi"].head(15)[::-1]
             figfi = px.bar(x=top_fi.values, y=top_fi.index, orientation="h", template=template_choice,
@@ -459,7 +451,6 @@ with tab_model:
             figfi.update_layout(height=min(chart_height, 600), margin=dict(l=10, r=10, t=10, b=10))
             st.plotly_chart(figfi, use_container_width=True)
 
-        # Leaderboard (same split)
         st.markdown("#### Model Leaderboard (same split)")
         bench_models = ["Random Forest", "Linear Regression", "Ridge", "Lasso", "ElasticNet", "GradientBoostingRegressor"]
         rows = []
@@ -476,9 +467,8 @@ with tab_model:
         leader = pd.DataFrame(rows).sort_values("RMSE")
         st.dataframe(leader, use_container_width=True)
 
-        # Permutation importance (tree models only to avoid scaler issues)
         st.markdown("#### Permutation Importance (Δ RMSE on shuffle)")
-        if res["fi"] is not None and len(res["fi"]) > 0:
+        if res["fi"] is not None and len(res["fi"]) > 0:  # tree models only
             try:
                 Xte_pi = res["Xte"].copy()
                 yte_pi = res["y_test"]
@@ -504,7 +494,6 @@ with tab_model:
         else:
             st.caption("Permutation importance is available for tree models (with feature importances).")
 
-        # Partial dependence (top feature, tree models)
         st.markdown("#### Partial Dependence (Top Feature)")
         if res.get("fi") is not None and len(res["fi"]) > 0:
             top_feat = res["fi"].index[0]
@@ -532,21 +521,37 @@ with tab_quality:
         noise_bp = st.slider("Add Gaussian noise (bps on Close)", 0, 50, 0, 5)
 
     exp_df = df.copy()
-    num_cols = [c for c in exp_df.columns if exp_df[c].dtype != "O"]
-    if choice == "Forward fill":
-        exp_df[num_cols] = exp_df[num_cols].ffill()
-    elif choice == "Time interpolate":
-        if "Date" in exp_df.columns:
-            exp_df = exp_df.set_index(date_col).sort_index()
-            exp_df[num_cols] = exp_df[num_cols].interpolate(method="time")
-            exp_df = exp_df.reset_index().rename(columns={date_col: date_col})
-        else:
-            exp_df[num_cols] = exp_df[num_cols].interpolate()
 
+    # Robust numeric detection that excludes datetime/object
+    num_cols = exp_df.select_dtypes(include=[np.number]).columns.tolist()
+
+    # Apply imputation choices safely
+    if choice == "Forward fill":
+        if num_cols:
+            exp_df[num_cols] = exp_df[num_cols].ffill()
+
+    elif choice == "Time interpolate":
+        if date_col in exp_df.columns:
+            # Use DatetimeIndex for method='time'
+            exp_df = exp_df.set_index(date_col).sort_index()
+            # Recompute numeric columns AFTER changing index (date is no longer a column)
+            num_cols_idx = exp_df.select_dtypes(include=[np.number]).columns.tolist()
+            if num_cols_idx:
+                exp_df[num_cols_idx] = exp_df[num_cols_idx].interpolate(method="time")
+            # Restore date column
+            exp_df = exp_df.reset_index().rename(columns={exp_df.columns[0]: date_col})
+        else:
+            # Fallback: interpolate numerics without time
+            num_cols_idx = exp_df.select_dtypes(include=[np.number]).columns.tolist()
+            if num_cols_idx:
+                exp_df[num_cols_idx] = exp_df[num_cols_idx].interpolate()
+
+    # Optional: noise injection on Close (in basis points)
     if noise_bp > 0:
         scale = noise_bp * 0.0001
         exp_df[price_col] = pd.to_numeric(exp_df[price_col], errors="coerce") * (1 + np.random.normal(0, scale, size=len(exp_df)))
 
+    # Rebuild features/target for experiment df
     exp_feat = exp_df.rename(columns={date_col:"Date", price_col:"Close"}).copy()
     if vol_col != "<none>" and vol_col in exp_df.columns:
         exp_feat["Volume"] = pd.to_numeric(exp_df[vol_col], errors="coerce")
@@ -567,9 +572,12 @@ with tab_quality:
 
     st.markdown("### Train vs Test Shift (KS)")
     if HAS_SCIPY:
+        # Use the same split fraction as Model Lab if available; else default 0.2
+        ks_test_frac = float(test_frac) if 'test_frac' in locals() else 0.2
         def ks_shift(col):
-            tr = df_feat[col].iloc[:int(len(df_feat)*(1-0.2))]
-            te = df_feat[col].iloc[int(len(df_feat)*(1-0.2)):]
+            cut_idx = int(len(df_feat)*(1-ks_test_frac))
+            tr = df_feat[col].iloc[:cut_idx]
+            te = df_feat[col].iloc[cut_idx:]
             tr, te = tr.dropna(), te.dropna()
             if len(tr)>20 and len(te)>20:
                 return float(ks_2samp(tr, te).statistic)
@@ -589,7 +597,6 @@ with tab_backtest:
         thr = st.slider("Signal threshold (predicted next-day return, %)", 0.0, 1.0, 0.10, 0.05) / 100.0
         fee_bp = st.slider("Round-trip cost (bps)", 0, 50, 5, 5) / 10000.0
 
-        # Use the exact split the model used
         cut_idx = res["cut"]
         if target == "Next-day Return":
             pred_ret = np.asarray(res["y_pred"]).ravel()
@@ -626,7 +633,7 @@ with tab_govern:
     st.markdown("""
 - **Transparency**: Feature choices (lags/MAs/vol windows), target definition (next-day), fixed split.
 - **Accountability**: Export the model card; log parameters, data ranges, and metrics.
-- **Fairness**: Compare performance under different imputation/noise settings; monitor train-test shifts (KS).
+- **Fairness**: Compare performance under different imputation/noise settings; monitor train–test shifts (KS).
 - **Overfitting Guardrails**: Prefer walk-forward/expanding-window CV before any live deployment.
 - **Regulatory**: Align with SEBI/ESMA model risk guidance; this dashboard is an educational prototype — **not investment advice**.
     """)

@@ -6,7 +6,6 @@ from io import BytesIO
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 st.set_page_config(page_title="IBR — AI in Financial Forecasting", layout="wide")
 
@@ -68,7 +67,7 @@ def engineer_features(
     if sentiment_col and sentiment_col in df.columns:
         s = pd.to_numeric(df[sentiment_col], errors="coerce")
         std = s.std(ddof=0)
-        df["sentiment_z"] = (s - s.mean()) / (std if std and std != 0 else 1)
+        df["sentiment_z"] = (s - s.mean()) / (std if (std and std != 0) else 1)
 
     if market_col and market_col in df.columns:
         df = pd.get_dummies(df, columns=[market_col], drop_first=True)
@@ -76,7 +75,19 @@ def engineer_features(
     return df
 
 def directional_accuracy(y_true, y_pred):
+    y_true = np.asarray(y_true).ravel()
+    y_pred = np.asarray(y_pred).ravel()
     return float((np.sign(y_true) == np.sign(y_pred)).mean())
+
+def _np_mae(y_true, y_pred):
+    y_true = np.asarray(y_true).ravel()
+    y_pred = np.asarray(y_pred).ravel()
+    return float(np.mean(np.abs(y_true - y_pred)))
+
+def _np_rmse(y_true, y_pred):
+    y_true = np.asarray(y_true).ravel()
+    y_pred = np.asarray(y_pred).ravel()
+    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
 
 def train_eval(df, target_col, features, model_name="Random Forest", test_frac=0.2):
     n = len(df)
@@ -91,6 +102,14 @@ def train_eval(df, target_col, features, model_name="Random Forest", test_frac=0
     Xtr, Xte = df[features].iloc[:cut], df[features].iloc[cut:]
     ytr, yte = df[target_col].iloc[:cut], df[target_col].iloc[cut:]
 
+    # sanity: drop columns that are entirely NaN or inf
+    Xtr = Xtr.replace([np.inf, -np.inf], np.nan).dropna(axis=1, how="all")
+    Xte = Xte[Xtr.columns]  # align columns
+    # if any column still has NaNs after rolling, fill with training medians
+    med = Xtr.median(numeric_only=True)
+    Xtr = Xtr.fillna(med)
+    Xte = Xte.fillna(med)
+
     scaler = StandardScaler()
     Xtr_s = scaler.fit_transform(Xtr)
     Xte_s = scaler.transform(Xte)
@@ -101,17 +120,15 @@ def train_eval(df, target_col, features, model_name="Random Forest", test_frac=0
         )
         model.fit(Xtr, ytr)
         yhat = model.predict(Xte)
-        fi = pd.Series(model.feature_importances_, index=features).sort_values(ascending=False)
+        fi = pd.Series(model.feature_importances_, index=Xtr.columns).sort_values(ascending=False)
     else:  # Linear Regression
         model = LinearRegression()
         model.fit(Xtr_s, ytr)
         yhat = model.predict(Xte_s)
         fi = None
 
-    # --- FIX for older scikit-learn: compute RMSE without 'squared=' ---
-    mse = mean_squared_error(yte, yhat)
-    rmse = float(np.sqrt(mse))
-    mae = float(mean_absolute_error(yte, yhat))
+    rmse = _np_rmse(yte, yhat)
+    mae = _np_mae(yte, yhat)
     try:
         da = directional_accuracy(yte, yhat)
     except Exception:
@@ -284,14 +301,15 @@ else:
     m1, m2, m3 = st.columns(3)
     m1.metric("RMSE", f"{res['RMSE']:.4f}")
     m2.metric("MAE", f"{res['MAE']:.4f}")
-    m3.metric("Directional Accuracy", "N/A" if np.isnan(res['DA']) else f"{res['DA']*100:.1f}%")
+    da_str = "N/A" if (res['DA'] is None or np.isnan(res['DA'])) else f"{res['DA']*100:.1f}%"
+    m3.metric("Directional Accuracy", da_str)
 
     st.write("Prediction vs Actual (Test Window)")
     test_idx = df_feat.index[res["cut"]:]
     plot_df = pd.DataFrame({
         "Date": df_feat.loc[test_idx, "Date"].values,
-        "Actual": res["y_test"].values,
-        "Pred": res["y_pred"],
+        "Actual": np.asarray(res["y_test"]).ravel(),
+        "Pred": np.asarray(res["y_pred"]).ravel(),
     })
     fig4 = plt.figure()
     plt.plot(plot_df["Date"], plot_df["Actual"], label="Actual")

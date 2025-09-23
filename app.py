@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import numpy as np  # ✅ make sure numpy is imported
+import numpy as np
 import matplotlib.pyplot as plt
 from io import BytesIO
 from sklearn.ensemble import RandomForestRegressor
@@ -43,7 +43,6 @@ def compute_returns(df, price_col="Close"):
         st.error(f"Column '{price_col}' contains no numeric values. Pick a different column or clean the data.")
         st.stop()
     out["Return"] = out[price_col].pct_change()
-    # use np.log1p safely; if Return < -1 it will become NaN which is fine
     out["LogReturn"] = np.log1p(out["Return"])
     return out
 
@@ -109,8 +108,10 @@ def train_eval(df, target_col, features, model_name="Random Forest", test_frac=0
         yhat = model.predict(Xte_s)
         fi = None
 
-    rmse = mean_squared_error(yte, yhat, squared=False)
-    mae = mean_absolute_error(yte, yhat)
+    # --- FIX for older scikit-learn: compute RMSE without 'squared=' ---
+    mse = mean_squared_error(yte, yhat)
+    rmse = float(np.sqrt(mse))
+    mae = float(mean_absolute_error(yte, yhat))
     try:
         da = directional_accuracy(yte, yhat)
     except Exception:

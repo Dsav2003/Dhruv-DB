@@ -2,5 +2,7 @@ streamlit
 pandas
 numpy
 scikit-learn
-matplotlib
 openpyxl
+plotly
+statsmodels      # optional, for ACF
+scipy            # optional, for KS shift

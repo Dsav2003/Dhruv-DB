@@ -3,7 +3,7 @@
 # - Feature engineering, multi-model lab, leaderboard, explainability
 # - Data-quality lab (imputation, noise, KS shift) — fixed KeyError in time interpolate
 # - Simple backtest + governance/model card
-# - NOTE: ACF section removed as requested (no statsmodels dependency)
+# - NOTE: Return Auto-Correlation section removed (no statsmodels dependency)
 
 import streamlit as st
 import pandas as pd
@@ -219,7 +219,7 @@ with pd.ExcelFile(upl) as xls:
 idx_default = sheets.index("Cleaned") if "Cleaned" in sheets else 0
 sheet_choice = st.sidebar.selectbox("Sheet", sheets, index=idx_default)
 
-# Chart options
+# Chart options (affect all major charts)
 st.sidebar.subheader("Chart Options")
 chart_height = st.sidebar.slider("Chart height (px)", 350, 900, 520, 10)
 use_log_y = st.sidebar.checkbox("Log scale for price", value=False)
@@ -240,12 +240,25 @@ df_raw = ensure_numeric(df_raw, [c for c in ["Open", "High", "Low", "Close", "Vo
 st.sidebar.subheader("Column Mapping")
 date_col = st.sidebar.selectbox("Date", options=df_raw.columns, index=list(df_raw.columns).index("Date") if "Date" in df_raw.columns else 0)
 price_col = st.sidebar.selectbox("Price (Close)", options=df_raw.columns, index=list(df_raw.columns).index("Close") if "Close" in df_raw.columns else 0)
-vol_col = st.sidebar.selectbox("Volume", options=["<none>"] + list(df_raw.columns),
-    index=(["<none>"] + list(df_raw.columns)).index("Volume") if "Volume" in df_raw.columns else 0)
-sent_col = st.sidebar.selectbox("Sentiment", options=["<none>"] + list(df_raw.columns),
-    index=(["<none>"] + list(df_raw.columns]).index("Sentiment_Score") if "Sentiment_Score" in df_raw.columns else 0))
-mkt_col = st.sidebar.selectbox("Market condition", options=["<none>"] + list(df_raw.columns),
-    index=(["<none>"] + list(df_raw.columns]).index("Market_Condition") if "Market_Condition" in df_raw.columns else 0))
+vol_col = st.sidebar.selectbox(
+    "Volume",
+    options=["<none>"] + list(df_raw.columns),
+    index=(["<none>"] + list(df_raw.columns)).index("Volume") if "Volume" in df_raw.columns else 0,
+)
+
+# ✅ FIXED: Sentiment & Market selectboxes (balanced brackets/parentheses)
+sent_col = st.sidebar.selectbox(
+    "Sentiment",
+    options=["<none>"] + list(df_raw.columns),
+    index=(["<none>"] + list(df_raw.columns)).index("Sentiment_Score")
+          if "Sentiment_Score" in df_raw.columns else 0,
+)
+mkt_col = st.sidebar.selectbox(
+    "Market condition",
+    options=["<none>"] + list(df_raw.columns),
+    index=(["<none>"] + list(df_raw.columns)).index("Market_Condition")
+          if "Market_Condition" in df_raw.columns else 0,
+)
 
 # Date filter
 df = df_raw.copy()
@@ -272,7 +285,7 @@ df_feat = df.rename(columns={date_col: "Date", price_col: "Close"}).copy()
 if vol_col != "<none>" and vol_col in df.columns:
     df_feat["Volume"] = pd.to_numeric(df[vol_col], errors="coerce")
 sentiment_in = None if sent_col == "<none>" else sent_col
-market_in = None if mkt_col == "<none>" else mkt_col
+market_in   = None if mkt_col == "<none>" else mkt_col
 
 df_feat = engineer_features(
     df_feat, price_col="Close", lags=lags, mas=mas, vol_windows=vols,
@@ -304,7 +317,8 @@ with k1:
 with k2:
     with st.container():
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("Rows (modeled)", f"{len[df_feat]:,}" if False else f"{len(df_feat):,}")
+        # ✅ cleaned line
+        st.metric("Rows (modeled)", f"{len(df_feat):,}")
         st.markdown("</div>", unsafe_allow_html=True)
 with k3:
     ann_vol = df_feat["Return"].std() * np.sqrt(252) if "Return" in df_feat.columns else np.nan
@@ -342,7 +356,8 @@ with tab_overview:
     else:
         fig.add_trace(
             go.Scatter(
-                x=df_feat["Date"], y=df_feat["Close"], mode="lines+markers" if show_markers else "lines",
+                x=df_feat["Date"], y=df_feat["Close"],
+                mode="lines+markers" if show_markers else "lines",
                 name="Close"
             ),
             row=1, col=1
@@ -523,7 +538,7 @@ with tab_quality:
             if num_cols_idx:
                 exp_df[num_cols_idx] = exp_df[num_cols_idx].interpolate(method="time")
             # Restore date column
-            exp_df = exp_df.reset_index().rename(columns={exp_df.columns[0]: date_col})
+            exp_df = exp_df.reset_index()
         else:
             # Fallback: interpolate numerics without time
             num_cols_idx = exp_df.select_dtypes(include=[np.number]).columns.tolist()

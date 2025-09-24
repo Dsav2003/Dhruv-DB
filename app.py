@@ -3,6 +3,7 @@
 # - Feature engineering, multi-model lab, leaderboard, explainability
 # - Data-quality lab (imputation, noise, KS shift) — fixed KeyError in time interpolate
 # - Simple backtest + governance/model card
+# - NOTE: ACF section removed as requested (no statsmodels dependency)
 
 import streamlit as st
 import pandas as pd
@@ -20,13 +21,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # Optional libs (graceful degradation)
-HAS_STATSMODELS = False
-try:
-    from statsmodels.tsa.stattools import acf as sm_acf
-    HAS_STATSMODELS = True
-except Exception:
-    pass
-
 HAS_SCIPY = False
 try:
     from scipy.stats import ks_2samp
@@ -225,7 +219,7 @@ with pd.ExcelFile(upl) as xls:
 idx_default = sheets.index("Cleaned") if "Cleaned" in sheets else 0
 sheet_choice = st.sidebar.selectbox("Sheet", sheets, index=idx_default)
 
-# Chart options (affect all major charts)
+# Chart options
 st.sidebar.subheader("Chart Options")
 chart_height = st.sidebar.slider("Chart height (px)", 350, 900, 520, 10)
 use_log_y = st.sidebar.checkbox("Log scale for price", value=False)
@@ -249,9 +243,9 @@ price_col = st.sidebar.selectbox("Price (Close)", options=df_raw.columns, index=
 vol_col = st.sidebar.selectbox("Volume", options=["<none>"] + list(df_raw.columns),
     index=(["<none>"] + list(df_raw.columns)).index("Volume") if "Volume" in df_raw.columns else 0)
 sent_col = st.sidebar.selectbox("Sentiment", options=["<none>"] + list(df_raw.columns),
-    index=(["<none>"] + list(df_raw.columns)).index("Sentiment_Score") if "Sentiment_Score" in df_raw.columns else 0)
+    index=(["<none>"] + list(df_raw.columns]).index("Sentiment_Score") if "Sentiment_Score" in df_raw.columns else 0))
 mkt_col = st.sidebar.selectbox("Market condition", options=["<none>"] + list(df_raw.columns),
-    index=(["<none>"] + list(df_raw.columns)).index("Market_Condition") if "Market_Condition" in df_raw.columns else 0)
+    index=(["<none>"] + list(df_raw.columns]).index("Market_Condition") if "Market_Condition" in df_raw.columns else 0))
 
 # Date filter
 df = df_raw.copy()
@@ -310,7 +304,7 @@ with k1:
 with k2:
     with st.container():
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("Rows (modeled)", f"{len(df_feat):,}")
+        st.metric("Rows (modeled)", f"{len[df_feat]:,}" if False else f"{len(df_feat):,}")
         st.markdown("</div>", unsafe_allow_html=True)
 with k3:
     ann_vol = df_feat["Return"].std() * np.sqrt(252) if "Return" in df_feat.columns else np.nan
@@ -401,16 +395,6 @@ with tab_eda:
 
     st.markdown("### Data Dictionary & Quality Summary")
     st.dataframe(data_summary(df), use_container_width=True, height=320)
-
-    st.markdown("### Return Auto-Correlation (lag 1–10)")
-    if HAS_STATSMODELS and "Return" in df_feat.columns:
-        series = df_feat["Return"].dropna().values
-        ac = sm_acf(series, nlags=10, fft=False)
-        fig_acf = px.bar(x=list(range(len(ac))), y=ac, template=template_choice, labels={"x": "Lag", "y": "ACF"})
-        fig_acf.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig_acf, use_container_width=True)
-    else:
-        st.caption("Install `statsmodels` to view ACF (optional).")
 
 # ---------- Model Lab ----------
 with tab_model:
@@ -572,7 +556,6 @@ with tab_quality:
 
     st.markdown("### Train vs Test Shift (KS)")
     if HAS_SCIPY:
-        # Use the same split fraction as Model Lab if available; else default 0.2
         ks_test_frac = float(test_frac) if 'test_frac' in locals() else 0.2
         def ks_shift(col):
             cut_idx = int(len(df_feat)*(1-ks_test_frac))
